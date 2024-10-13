@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 import time, importlib, inspect, os, json
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, TypedDict
 import uuid
 from python.helpers import extract_tools, rate_limiter, files, errors
 from python.helpers.print_style import PrintStyle
@@ -14,6 +14,7 @@ from langchain_core.embeddings import Embeddings
 import python.helpers.log as Log
 from python.helpers.dirty_json import DirtyJson
 from python.helpers.defer import DeferredTask
+from typing import Callable
 
 
 class AgentContext:
@@ -78,7 +79,7 @@ class AgentContext:
                 broadcast_level -= 1
                 intervention_agent = intervention_agent.data.get("superior", None)
         else:
-            self.process = DeferredTask(self.agent0.message_loop, msg)
+            self.process = DeferredTask(self.agent0.monologue, msg)
 
         return self.process
 
@@ -90,7 +91,7 @@ class AgentConfig:
     embeddings_model: Embeddings
     prompts_subdir: str = ""
     memory_subdir: str = ""
-    knowledge_subdir: str = ""
+    knowledge_subdirs: list[str] = field(default_factory=lambda: ["default", "custom"])
     auto_memory_count: int = 3
     auto_memory_skip: int = 2
     rate_limit_seconds: int = 60
@@ -110,7 +111,8 @@ class AgentConfig:
     )
     code_exec_docker_volumes: dict[str, dict[str, str]] = field(
         default_factory=lambda: {
-            files.get_abs_path("work_dir"): {"bind": "/root", "mode": "rw"}
+            files.get_abs_path("work_dir"): {"bind": "/root", "mode": "rw"},
+            files.get_abs_path("instruments"): {"bind": "/instruments", "mode": "rw"},
         }
     )
     code_exec_ssh_enabled: bool = True
@@ -121,12 +123,52 @@ class AgentConfig:
     additional: Dict[str, Any] = field(default_factory=dict)
 
 
+class Message:
+    def __init__(self):
+        self.segments: list[str]
+        self.human: bool
+
+
+class Monologue:
+    def __init__(self):
+        self.done = False
+        self.summary: str = ""
+        self.messages: list[Message] = []
+
+    def finish(self):
+        pass
+
+
+class History:
+    def __init__(self):
+        self.monologues: list[Monologue] = []
+        self.start_monologue()
+
+    def current_monologue(self):
+        return self.monologues[-1]
+
+    def start_monologue(self):
+        if self.monologues:
+            self.current_monologue().finish()
+        self.monologues.append(Monologue())
+        return self.current_monologue()
+
+
+class LoopData:
+    def __init__(self):
+        self.iteration = -1
+        self.system = []
+        self.message = ""
+        self.history_from = 0
+        self.history = []
+
+
 # intervention exception class - skips rest of message loop iteration
 class InterventionException(Exception):
     pass
 
 
-# repairable exception class - forwarded to LLM, may be fixed on its own
+# killer exception class - not forwarded to LLM, cannot be fixed on its own, ends message loop
 class RepairableException(Exception):
     pass
 
@@ -159,42 +201,50 @@ class Agent:
         )
         self.data = {}  # free data object all the tools can use
 
-    async def message_loop(self, msg: str):
+    async def monologue(self, msg: str):
         try:
-            printer = PrintStyle(italic=True, font_color="#b3ffd9", padding=False)
-            user_message = self.read_prompt("fw.user_message.md", message=msg)
-            await self.append_message(
-                user_message, human=True
-            )  # Append the user's input to the history
-            memories = await self.fetch_memories(True)
+            # loop data dictionary to pass to extensions
+            loop_data = LoopData()
+            loop_data.message = msg
+            loop_data.history_from = len(self.history)
 
-            while (
-                True
-            ):  # let the agent iterate on his thoughts until he stops by using a tool
+            # call monologue_start extensions
+            await self.call_extensions("monologue_start", loop_data=loop_data)
+
+            printer = PrintStyle(italic=True, font_color="#b3ffd9", padding=False)
+            user_message = self.read_prompt(
+                "fw.user_message.md", message=loop_data.message
+            )
+            await self.append_message(user_message, human=True)
+
+            # let the agent run message loop until he stops it with a response tool
+            while True:
+
                 self.context.streaming_agent = self  # mark self as current streamer
                 agent_response = ""
+                loop_data.iteration += 1
 
                 try:
 
-                    system = (
-                        self.read_prompt("agent.system.md", agent_name=self.agent_name)
-                        + "\n\n"
-                        + self.read_prompt("agent.tools.md")
-                    )
-                    memories = await self.fetch_memories()
-                    if memories:
-                        system += "\n\n" + memories
+                    # set system prompt and message history
+                    loop_data.system = []
+                    loop_data.history = self.history
 
+                    # and allow extensions to edit them
+                    await self.call_extensions(
+                        "message_loop_prompts", loop_data=loop_data
+                    )
+
+                    # build chain from system prompt, message history and model
                     prompt = ChatPromptTemplate.from_messages(
                         [
-                            SystemMessage(content=system),
+                            SystemMessage(content="\n\n".join(loop_data.system)),
                             MessagesPlaceholder(variable_name="messages"),
                         ]
                     )
-
-                    inputs = {"messages": self.history}
                     chain = prompt | self.config.chat_model
 
+                    # rate limiter TODO - move to extension, make per-model
                     formatted_inputs = prompt.format(messages=self.history)
                     tokens = int(len(formatted_inputs) / 4)
                     self.rate_limiter.limit_call_and_input(tokens)
@@ -205,12 +255,12 @@ class Agent:
                         font_color="green",
                         padding=True,
                         background_color="white",
-                    ).print(f"{self.agent_name}: Generating:")
+                    ).print(f"{self.agent_name}: Generating")
                     log = self.context.log.log(
-                        type="agent", heading=f"{self.agent_name}: Generating:"
+                        type="agent", heading=f"{self.agent_name}: Generating"
                     )
 
-                    async for chunk in chain.astream(inputs):
+                    async for chunk in chain.astream({"messages": loop_data.history}):
                         await self.handle_intervention(
                             agent_response
                         )  # wait for intervention and handle it, if paused
@@ -256,6 +306,9 @@ class Agent:
                             agent_response
                         )  # process tools requested in agent message
                         if tools_result:  # final response of message loop available
+                            await self.call_extensions(
+                                "monologue_end", tools_result=tools_result
+                            )  # call monologue_end extensions
                             return (
                                 tools_result  # break the execution if the task is done
                             )
@@ -267,7 +320,9 @@ class Agent:
                         font_color="white", background_color="red", padding=True
                     ).print(f"Context {self.context.id} terminated during message loop")
                     raise e  # process cancelled from outside, kill the loop
-                except RepairableException as e:  # Forward repairable errors to the LLM, maybe it can fix them
+                except (
+                    RepairableException
+                ) as e:  # Forward repairable errors to the LLM, maybe it can fix them
                     error_message = errors.format_error(e)
                     msg_response = self.read_prompt(
                         "fw.error.md", error=error_message
@@ -284,23 +339,15 @@ class Agent:
         finally:
             self.context.streaming_agent = None  # unset current streamer
 
-    def read_prompt(self, file: str, **kwargs):
-        content = ""
-        if self.config.prompts_subdir:
-            try:
-                content = files.read_file(
-                    files.get_abs_path(
-                        f"./prompts/{self.config.prompts_subdir}/{file}"
-                    ),
-                    **kwargs,
-                )
-            except Exception as e:
-                pass
-        if not content:
-            content = files.read_file(
-                files.get_abs_path(f"./prompts/default/{file}"), **kwargs
-            )
-        return content
+    def read_prompt(self, file: str, **kwargs) -> str:
+        prompt_dir = files.get_abs_path("prompts/default")
+        backup_dir = []
+        if self.config.prompts_subdir: # if agent has custom folder, use it and use default as backup
+            prompt_dir = files.get_abs_path("prompts", self.config.prompts_subdir)
+            backup_dir.append(files.get_abs_path("prompts/default"))
+        return files.read_file(
+            files.get_abs_path(prompt_dir, file), backup_dirs=backup_dir, **kwargs
+        )
 
     def get_data(self, field: str):
         return self.data.get(field, None)
@@ -326,32 +373,22 @@ class Agent:
     def concat_messages(self, messages):
         return "\n".join([f"{msg.type}: {msg.content}" for msg in messages])
 
-    async def send_adhoc_message(self, system: str, msg: str, output_label: str):
+    async def call_utility_llm(
+        self, system: str, msg: str, callback: Callable[[str], None] | None = None
+    ):
         prompt = ChatPromptTemplate.from_messages(
             [SystemMessage(content=system), HumanMessage(content=msg)]
         )
 
         chain = prompt | self.config.utility_model
         response = ""
-        printer = None
-        logger = None
-
-        if output_label:
-            PrintStyle(
-                bold=True, font_color="orange", padding=True, background_color="white"
-            ).print(f"{self.agent_name}: {output_label}:")
-            printer = PrintStyle(italic=True, font_color="orange", padding=False)
-            logger = self.context.log.log(
-                type="adhoc", heading=f"{self.agent_name}: {output_label}:"
-            )
 
         formatted_inputs = prompt.format()
         tokens = int(len(formatted_inputs) / 4)
         self.rate_limiter.limit_call_and_input(tokens)
 
         async for chunk in chain.astream({}):
-            if self.handle_intervention():
-                break  # wait for intervention and handle it, if paused
+            await self.handle_intervention()  # wait for intervention and handle it, if paused
 
             if isinstance(chunk, str):
                 content = chunk
@@ -360,11 +397,10 @@ class Agent:
             else:
                 content = str(chunk)
 
-            if printer:
-                printer.stream(content)
+            if callback:
+                callback(content)
+
             response += content
-            if logger:
-                logger.update(content=response)
 
         self.rate_limiter.set_output_tokens(int(len(response) / 4))
 
@@ -376,10 +412,23 @@ class Agent:
 
     async def replace_middle_messages(self, middle_messages):
         cleanup_prompt = self.read_prompt("fw.msg_cleanup.md")
-        summary = await self.send_adhoc_message(
+        log_item = self.context.log.log(
+            type="util", heading="Mid messages cleanup summary"
+        )
+
+        PrintStyle(
+            bold=True, font_color="orange", padding=True, background_color="white"
+        ).print(f"{self.agent_name}: Mid messages cleanup summary")
+        printer = PrintStyle(italic=True, font_color="orange", padding=False)
+
+        def log_callback(content):
+            printer.print(content)
+            log_item.stream(content=content)
+
+        summary = await self.call_utility_llm(
             system=cleanup_prompt,
             msg=self.concat_messages(middle_messages),
-            output_label="Mid messages cleanup summary",
+            callback=log_callback,
         )
         new_human_message = HumanMessage(content=summary)
         return [new_human_message]
@@ -453,52 +502,8 @@ class Agent:
             await self.append_message(msg, human=True)
             PrintStyle(font_color="red", padding=True).print(msg)
             self.context.log.log(
-                type="error", content=f"{self.agent_name}: Message misformat:"
+                type="error", content=f"{self.agent_name}: Message misformat"
             )
-
-    def get_tool(self, name: str, args: dict, message: str, **kwargs):
-        from python.tools.unknown import Unknown
-        from python.helpers.tool import Tool
-
-        tool_class = Unknown
-        if files.exists("python/tools", f"{name}.py"):
-            module = importlib.import_module(
-                "python.tools." + name
-            )  # Import the module
-            class_list = inspect.getmembers(
-                module, inspect.isclass
-            )  # Get all functions in the module
-
-            for cls in class_list:
-                if cls[1] is not Tool and issubclass(cls[1], Tool):
-                    tool_class = cls[1]
-                    break
-
-        return tool_class(agent=self, name=name, args=args, message=message, **kwargs)
-
-    async def fetch_memories(self, reset_skip=False):
-        if self.config.auto_memory_count <= 0:
-            return ""
-        if reset_skip:
-            self.memory_skip_counter = 0
-
-        if self.memory_skip_counter > 0:
-            self.memory_skip_counter -= 1
-            return ""
-        else:
-            self.memory_skip_counter = self.config.auto_memory_skip
-            from python.tools import memory_tool
-
-            messages = self.concat_messages(self.history)
-            memories = memory_tool.search(self, messages)
-            input = {"conversation_history": messages, "raw_memories": memories}
-            cleanup_prompt = self.read_prompt("msg.memory_cleanup.md").replace(
-                "{", "{{"
-            )
-            clean_memories = await self.send_adhoc_message(
-                cleanup_prompt, json.dumps(input), output_label="Memory injection"
-            )
-            return clean_memories
 
     def log_from_stream(self, stream: str, logItem: Log.LogItem):
         try:
@@ -512,5 +517,21 @@ class Agent:
         except Exception as e:
             pass
 
-    def call_extension(self, name: str, **kwargs) -> Any:
-        pass
+    def get_tool(self, name: str, args: dict, message: str, **kwargs):
+        from python.tools.unknown import Unknown
+        from python.helpers.tool import Tool
+
+        classes = extract_tools.load_classes_from_folder(
+            "python/tools", name + ".py", Tool
+        )
+        tool_class = classes[0] if classes else Unknown
+        return tool_class(agent=self, name=name, args=args, message=message, **kwargs)
+
+    async def call_extensions(self, folder: str, **kwargs) -> Any:
+        from python.helpers.extension import Extension
+
+        classes = extract_tools.load_classes_from_folder(
+            "python/extensions/" + folder, "*", Extension
+        )
+        for cls in classes:
+            await cls(agent=self).execute(**kwargs)

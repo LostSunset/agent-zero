@@ -1,7 +1,7 @@
 import * as msgs from "./messages.js"
 
-const splitter = document.getElementById('splitter');
 const leftPanel = document.getElementById('left-panel');
+const rightPanel = document.getElementById('right-panel');
 const container = document.querySelector('.container');
 const chatInput = document.getElementById('chat-input');
 const chatHistory = document.getElementById('chat-history');
@@ -9,40 +9,78 @@ const sendButton = document.getElementById('send-button');
 const inputSection = document.getElementById('input-section');
 const statusSection = document.getElementById('status-section');
 const chatsSection = document.getElementById('chats-section');
+const scrollbarThumb = document.querySelector('#chat-history::-webkit-scrollbar-thumb');
+const progressBar = document.getElementById('progress-bar');
+const autoScrollSwitch = document.getElementById('auto-scroll-switch');
 
-let isResizing = false;
+
+
 let autoScroll = true;
-
 let context = "";
 
+// Initialize the toggle button 
+setupSidebarToggle();
 
-splitter.addEventListener('mousedown', (e) => {
-    isResizing = true;
-    document.addEventListener('mousemove', resize);
-    document.addEventListener('mouseup', stopResize);
-});
+function isMobile() {
+    return window.innerWidth <= 768;
+}
 
-function resize(e) {
-    if (isResizing) {
-        const newWidth = e.clientX - container.offsetLeft;
-        leftPanel.style.width = `${newWidth}px`;
+function toggleSidebar() {
+    leftPanel.classList.toggle('hidden');
+    rightPanel.classList.toggle('expanded');
+}
+
+function handleResize() {
+    if (isMobile()) {
+        leftPanel.classList.add('hidden');
+        rightPanel.classList.add('expanded');
+    } else {
+        leftPanel.classList.remove('hidden');
+        rightPanel.classList.remove('expanded');
     }
 }
 
-function stopResize() {
-    isResizing = false;
-    document.removeEventListener('mousemove', resize);
+// Run on startup and window resize
+window.addEventListener('load', handleResize);
+window.addEventListener('resize', handleResize);
+
+function setupSidebarToggle() {
+    const leftPanel = document.getElementById('left-panel');
+    const rightPanel = document.getElementById('right-panel');
+    const toggleSidebarButton = document.getElementById('toggle-sidebar');
+    if (toggleSidebarButton) {
+        toggleSidebarButton.addEventListener('click', toggleSidebar);
+    } else {
+        console.error('Toggle sidebar button not found');
+        setTimeout(setupSidebarToggle, 100);
+    }
 }
+// Make sure to call this function
+document.addEventListener('DOMContentLoaded', setupSidebarToggle);
 
 async function sendMessage() {
-    const message = chatInput.value.trim();
-    if (message) {
+    try {
+        const message = chatInput.value.trim();
+        if (message) {
 
-        const response = await sendJsonData("/msg", { text: message, context });
+            const response = await sendJsonData("/msg", { text: message, context });
 
-        //setMessage('user', message);
-        chatInput.value = '';
-        adjustTextareaHeight();
+            if (!response) {
+                toast("No response returned.", "error")
+            } else if (!response.ok) {
+                if (response.message) {
+                    toast(response.message, "error")
+                } else {
+                    toast("Undefined error.", "error")
+                }
+            }
+
+            //setMessage('user', message);
+            chatInput.value = '';
+            adjustTextareaHeight();
+        }
+    } catch (e) {
+        toast(e.message, "error")
     }
 }
 
@@ -55,7 +93,30 @@ chatInput.addEventListener('keydown', (e) => {
 
 sendButton.addEventListener('click', sendMessage);
 
-function setMessage(id, type, heading, content, kvps = null) {
+function updateUserTime() {
+    const now = new Date();
+    const hours = now.getHours();
+    const minutes = now.getMinutes();
+    const seconds = now.getSeconds();
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    const formattedHours = hours % 12 || 12;
+
+    // Format the time
+    const timeString = `${formattedHours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')} ${ampm}`;
+
+    // Format the date
+    const options = { year: 'numeric', month: 'short', day: 'numeric' };
+    const dateString = now.toLocaleDateString(undefined, options);
+
+    // Update the HTML
+    const userTimeElement = document.getElementById('time-date');
+    userTimeElement.innerHTML = `${timeString}<br><span id="user-date">${dateString}</span>`;
+}
+
+updateUserTime();
+setInterval(updateUserTime, 1000);
+
+function setMessage(id, type, heading, content, temp, kvps = null) {
     // Search for the existing message container by id
     let messageContainer = document.getElementById(`message-${id}`);
 
@@ -68,10 +129,12 @@ function setMessage(id, type, heading, content, kvps = null) {
         messageContainer = document.createElement('div');
         messageContainer.id = `message-${id}`;
         messageContainer.classList.add('message-container', `${sender}-container`);
+        if (temp) messageContainer.classList.add("message-temp")
+
     }
 
     const handler = msgs.getHandler(type);
-    handler(messageContainer, id, type, heading, content, kvps);
+    handler(messageContainer, id, type, heading, content, temp, kvps);
 
     // If the container was found, it was already in the DOM, no need to append again
     if (!document.getElementById(`message-${id}`)) {
@@ -80,6 +143,7 @@ function setMessage(id, type, heading, content, kvps = null) {
 
     if (autoScroll) chatHistory.scrollTop = chatHistory.scrollHeight;
 }
+
 
 
 function adjustTextareaHeight() {
@@ -99,7 +163,6 @@ async function sendJsonData(url, data) {
     if (!response.ok) {
         throw new Error('Network response was not ok');
     }
-
     const jsonResponse = await response.json();
     return jsonResponse;
 }
@@ -116,9 +179,10 @@ let lastLogVersion = 0;
 let lastLogGuid = ""
 
 async function poll() {
+    let updated = false
     try {
         const response = await sendJsonData("/poll", { log_from: lastLogVersion, context });
-        // console.log(response)
+        //console.log(response)
 
         if (response.ok) {
 
@@ -130,10 +194,13 @@ async function poll() {
             }
 
             if (lastLogVersion != response.log_version) {
+                updated = true
                 for (const log of response.logs) {
-                    setMessage(log.no, log.type, log.heading, log.content, log.kvps);
+                    setMessage(log.no, log.type, log.heading, log.content, log.temp, log.kvps);
                 }
             }
+
+            updateProgress(response.log_progress)
 
             //set ui model vars from backend
             const inputAD = Alpine.$data(inputSection);
@@ -154,18 +221,44 @@ async function poll() {
         const statusAD = Alpine.$data(statusSection);
         statusAD.connected = false;
     }
+
+    return updated
+}
+
+function updateProgress(progress) {
+    if (!progress) progress = "Waiting for input"
+
+    if (progressBar.innerHTML != progress) {
+        progressBar.innerHTML = progress
+    }
+}
+
+function updatePauseButtonState(isPaused) {
+    const pauseButton = document.getElementById('pause-button');
+    const unpauseButton = document.getElementById('unpause-button');
+
+    if (isPaused) {
+        pauseButton.style.display = 'none';
+        unpauseButton.style.display = 'flex';
+    } else {
+        pauseButton.style.display = 'flex';
+        unpauseButton.style.display = 'none';
+    }
 }
 
 window.pauseAgent = async function (paused) {
     const resp = await sendJsonData("/pause", { paused: paused, context });
+    updatePauseButtonState(paused);
 }
 
 window.resetChat = async function () {
     const resp = await sendJsonData("/reset", { context });
+    updateAfterScroll()
 }
 
 window.newChat = async function () {
     setContext(generateGUID());
+    updateAfterScroll()
 }
 
 window.killChat = async function (id) {
@@ -186,12 +279,15 @@ window.killChat = async function (id) {
         if (other) setContext(other.id)
         else setContext(generateGUID())
     }
-    
+
     if (found) sendJsonData("/remove", { context: id });
+
+    updateAfterScroll()
 }
 
 window.selectChat = async function (id) {
     setContext(id)
+    updateAfterScroll()
 }
 
 const setContext = function (id) {
@@ -202,7 +298,6 @@ const setContext = function (id) {
     const chatsAD = Alpine.$data(chatsSection);
     chatsAD.selected = id
 }
-
 
 window.toggleAutoScroll = async function (_autoScroll) {
     autoScroll = _autoScroll;
@@ -218,6 +313,38 @@ window.toggleThoughts = async function (showThoughts) {
     toggleCssProperty('.msg-thoughts', 'display', showThoughts ? undefined : 'none');
 }
 
+window.toggleUtils = async function (showUtils) {
+    // add display:none to .msg-json class definition
+    toggleCssProperty('.message-util', 'display', showUtils ? undefined : 'none');
+    // toggleCssProperty('.message-util .msg-kvps', 'display', showUtils ? undefined : 'none');
+    // toggleCssProperty('.message-util .msg-content', 'display', showUtils ? undefined : 'none');
+}
+
+window.toggleDarkMode = function (isDark) {
+    if (isDark) {
+        document.body.classList.remove('light-mode');
+    } else {
+        document.body.classList.add('light-mode');
+    }
+    console.log("Dark mode:", isDark);
+    localStorage.setItem('darkMode', isDark);
+};
+
+// Modify this part
+document.addEventListener('DOMContentLoaded', () => {
+    const isDarkMode = localStorage.getItem('darkMode') !== 'false';
+    toggleDarkMode(isDarkMode);
+});
+
+window.toggleDarkMode = function (isDark) {
+    if (isDark) {
+        document.body.classList.remove('light-mode');
+    } else {
+        document.body.classList.add('light-mode');
+    }
+    console.log("Dark mode:", isDark);
+    localStorage.setItem('darkMode', isDark);
+};
 
 function toggleCssProperty(selector, property, value) {
     // Get the stylesheet that contains the class
@@ -233,9 +360,9 @@ function toggleCssProperty(selector, property, value) {
             if (rule.selectorText == selector) {
                 // Check if the property is already applied
                 if (value === undefined) {
-                    rule.style.removeProperty(property);  // Remove the property
+                    rule.style.removeProperty(property);
                 } else {
-                    rule.style.setProperty(property, value);  // Add the property (you can customize the value)
+                    rule.style.setProperty(property, value);
                 }
                 return;
             }
@@ -243,6 +370,86 @@ function toggleCssProperty(selector, property, value) {
     }
 }
 
+function toast(text, type = 'info') {
+    const toast = document.getElementById('toast');
+
+    // Update the toast content and type
+    toast.querySelector('#toast .toast__message').textContent = text;
+    toast.className = `toast toast--${type}`;
+    toast.style.display = 'flex';
+
+    // Add the close button event listener
+    const closeButton = toast.querySelector('#toast .toast__close');
+    closeButton.onclick = () => {
+        toast.style.display = 'none';
+        clearTimeout(toast.timeoutId);
+    };
+
+    // Add the copy button event listener
+    const copyButton = toast.querySelector('#toast .toast__copy');
+    copyButton.onclick = () => {
+        navigator.clipboard.writeText(text);
+        copyButton.textContent = 'Copied!';
+        setTimeout(() => {
+            copyButton.textContent = 'Copy';
+        }, 2000);
+    };
+
+    // Clear any existing timeout
+    clearTimeout(toast.timeoutId);
+
+    // Automatically close the toast after 5 seconds
+    toast.timeoutId = setTimeout(() => {
+        toast.style.display = 'none';
+    }, 10000);
+}
+
+function scrollChanged(isAtBottom) {
+    const inputAS = Alpine.$data(autoScrollSwitch);
+    inputAS.autoScroll = isAtBottom
+    // autoScrollSwitch.checked = isAtBottom
+    console.log(isAtBottom)
+}
+
+function updateAfterScroll() {
+    // const toleranceEm = 1; // Tolerance in em units
+    // const tolerancePx = toleranceEm * parseFloat(getComputedStyle(document.documentElement).fontSize); // Convert em to pixels
+    const tolerancePx = 50;
+    const chatHistory = document.getElementById('chat-history');
+    const isAtBottom = (chatHistory.scrollHeight - chatHistory.scrollTop) <= (chatHistory.clientHeight + tolerancePx);
+
+    scrollChanged(isAtBottom);
+}
+
+chatHistory.addEventListener('scroll', updateAfterScroll);
+
 chatInput.addEventListener('input', adjustTextareaHeight);
 
-setInterval(poll, 250);
+// setInterval(poll, 250);
+
+async function startPolling() {
+    const shortInterval = 25
+    const longInterval = 250
+    const shortIntervalPeriod = 100
+    let shortIntervalCount = 0
+
+    async function _doPoll() {
+        let nextInterval = longInterval
+
+        try {
+            const result = await poll();
+            if (result) shortIntervalCount = shortIntervalPeriod; // Reset the counter when the result is true
+            if (shortIntervalCount > 0) shortIntervalCount--; // Decrease the counter on each call
+            nextInterval = shortIntervalCount > 0 ? shortInterval : longInterval;
+        } catch (error) {
+            console.error('Error:', error);
+        }
+
+        // Call the function again after the selected interval
+        setTimeout(_doPoll.bind(this), nextInterval);
+    }
+
+    _doPoll();
+}
+
+document.addEventListener("DOMContentLoaded", startPolling);

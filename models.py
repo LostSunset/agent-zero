@@ -8,6 +8,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import GoogleGenerativeAI, HarmBlockThreshold, HarmCategory
+from langchain_mistralai import ChatMistralAI
 from pydantic.v1.types import SecretStr
 
 
@@ -69,6 +70,10 @@ def get_azure_openai_embedding(deployment_name:str, api_key=get_api_key("openai_
 def get_google_chat(model_name:str, api_key=get_api_key("google"), temperature=DEFAULT_TEMPERATURE):
     return GoogleGenerativeAI(model=model_name, temperature=temperature, google_api_key=api_key, safety_settings={HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE }) # type: ignore
 
+# Mistral models
+def get_mistral_chat(model_name:str, api_key=get_api_key("mistral"), temperature=DEFAULT_TEMPERATURE):
+    return ChatMistralAI(model=model_name, temperature=temperature, api_key=api_key) # type: ignore
+
 # Groq models
 def get_groq_chat(model_name:str, api_key=get_api_key("groq"), temperature=DEFAULT_TEMPERATURE):
     return ChatGroq(model_name=model_name, temperature=temperature, api_key=api_key) # type: ignore
@@ -79,3 +84,8 @@ def get_openrouter_chat(model_name: str, api_key=get_api_key("openrouter"), temp
       
 def get_openrouter_embedding(model_name: str, api_key=get_api_key("openrouter"), base_url=os.getenv("OPEN_ROUTER_BASE_URL") or "https://openrouter.ai/api/v1"):
     return OpenAIEmbeddings(model=model_name, api_key=api_key, base_url=base_url) # type: ignore
+
+# Sambanova models
+def get_sambanova_chat(model_name: str, api_key=get_api_key("sambanova"), temperature=DEFAULT_TEMPERATURE, base_url=os.getenv("SAMBANOVA_BASE_URL") or "https://fast-api.snova.ai/v1", max_tokens=1024):
+    return ChatOpenAI(api_key=api_key, model=model_name, temperature=temperature, base_url=base_url, max_tokens=max_tokens) # type: ignore
+   
