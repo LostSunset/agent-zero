@@ -1,31 +1,23 @@
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass, field
-import time, importlib, inspect, os, json
-import token
+from datetime import datetime
 from typing import Any, Awaitable, Coroutine, Optional, Dict, TypedDict
 import uuid
 import models
 
-from langchain_core.prompt_values import ChatPromptValue
 from python.helpers import extract_tools, rate_limiter, files, errors, history, tokens
 from python.helpers.print_style import PrintStyle
 from langchain_core.prompts import (
     ChatPromptTemplate,
-    MessagesPlaceholder,
-    HumanMessagePromptTemplate,
-    StringPromptTemplate,
 )
-from langchain_core.prompts.image import ImagePromptTemplate
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, BaseMessage
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.language_models.llms import BaseLLM
-from langchain_core.embeddings import Embeddings
+
 import python.helpers.log as Log
 from python.helpers.dirty_json import DirtyJson
 from python.helpers.defer import DeferredTask
 from typing import Callable
-from python.helpers.history import OutputMessage
+from python.helpers.localization import Localization
 
 
 class AgentContext:
@@ -42,6 +34,7 @@ class AgentContext:
         log: Log.Log | None = None,
         paused: bool = False,
         streaming_agent: "Agent|None" = None,
+        created_at: datetime | None = None,
     ):
         # build context
         self.id = id or str(uuid.uuid4())
@@ -52,6 +45,7 @@ class AgentContext:
         self.paused = paused
         self.streaming_agent = streaming_agent
         self.task: DeferredTask | None = None
+        self.created_at = created_at or datetime.now()
         AgentContext._counter += 1
         self.no = AgentContext._counter
 
@@ -76,6 +70,24 @@ class AgentContext:
         if context and context.task:
             context.task.kill()
         return context
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "created_at": (
+                Localization.get().serialize_datetime(self.created_at)
+                if self.created_at else Localization.get().serialize_datetime(datetime.fromtimestamp(0))
+            ),
+            "no": self.no,
+            "log_guid": self.log.guid,
+            "log_version": len(self.log.updates),
+            "log_length": len(self.log.logs),
+            "paused": self.paused,
+        }
+
+    def get_created_at(self):
+        return self.created_at
 
     def kill_process(self):
         if self.task:
@@ -141,10 +153,10 @@ class AgentContext:
                     tool_name="call_subordinate", tool_result=msg  # type: ignore
                 )
             )
-            response = await agent.monologue()
+            response = await agent.monologue()  # type: ignore
             superior = agent.data.get(Agent.DATA_NAME_SUPERIOR, None)
             if superior:
-                response = await self._process_chain(superior, response, False)
+                response = await self._process_chain(superior, response, False)  # type: ignore
             return response
         except Exception as e:
             agent.handle_critical_exception(e)
@@ -195,6 +207,7 @@ class AgentConfig:
 class UserMessage:
     message: str
     attachments: list[str] = field(default_factory=list[str])
+    system_message: list[str] = field(default_factory=list[str])
 
 
 class LoopData:
@@ -290,7 +303,7 @@ class Agent:
 
                         agent_response = await self.call_chat_model(
                             prompt, callback=stream_callback
-                        )
+                        )  # type: ignore
 
                         await self.handle_intervention(agent_response)
 
@@ -466,21 +479,19 @@ class Agent:
                 "fw.intervention.md",
                 message=message.message,
                 attachments=message.attachments,
+                system_message=message.system_message
             )
         else:
             content = self.parse_prompt(
                 "fw.user_message.md",
                 message=message.message,
                 attachments=message.attachments,
+                system_message=message.system_message
             )
 
-        # remove empty attachments from template
-        if (
-            isinstance(content, dict)
-            and "attachments" in content
-            and not content["attachments"]
-        ):
-            del content["attachments"]
+        # remove empty parts from template
+        if isinstance(content, dict):
+            content = {k: v for k, v in content.items() if v}
 
         # add to history
         msg = self.hist_add_message(False, content=content)  # type: ignore
@@ -645,8 +656,13 @@ class Agent:
 
         if tool_request is not None:
             tool_name = tool_request.get("tool_name", "")
+            tool_method = None
             tool_args = tool_request.get("tool_args", {})
-            tool = self.get_tool(tool_name, tool_args, msg)
+
+            if ":" in tool_name:
+                tool_name, tool_method = tool_name.split(":", 1)
+
+            tool = self.get_tool(name=tool_name, method=tool_method, args=tool_args, message=msg)
 
             await self.handle_intervention()  # wait if paused and handle intervention message if needed
             await tool.before_execution(**tool_args)
@@ -676,7 +692,7 @@ class Agent:
         except Exception as e:
             pass
 
-    def get_tool(self, name: str, args: dict, message: str, **kwargs):
+    def get_tool(self, name: str, method: str | None, args: dict, message: str, **kwargs):
         from python.tools.unknown import Unknown
         from python.helpers.tool import Tool
 
@@ -684,7 +700,7 @@ class Agent:
             "python/tools", name + ".py", Tool
         )
         tool_class = classes[0] if classes else Unknown
-        return tool_class(agent=self, name=name, args=args, message=message, **kwargs)
+        return tool_class(agent=self, name=name, method=method, args=args, message=message, **kwargs)
 
     async def call_extensions(self, folder: str, **kwargs) -> Any:
         from python.helpers.extension import Extension

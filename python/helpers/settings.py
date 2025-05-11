@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import re
@@ -90,6 +89,7 @@ class SettingsSection(TypedDict, total=False):
     title: str
     description: str
     fields: list[SettingsField]
+    tab: str  # Indicates which tab this section belongs to
 
 
 class SettingsOutput(TypedDict):
@@ -150,7 +150,6 @@ def convert_out(settings: Settings) -> SettingsOutput:
         }
     )
 
-
     chat_model_fields.append(
         {
             "id": "chat_model_vision",
@@ -206,6 +205,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Chat Model",
         "description": "Selection and settings for main chat model used by Agent Zero",
         "fields": chat_model_fields,
+        "tab": "agent",
     }
 
     # main model section
@@ -275,6 +275,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Utility model",
         "description": "Smaller, cheaper, faster model for handling utility tasks like organizing memory, preparing prompts, summarizing.",
         "fields": util_model_fields,
+        "tab": "agent",
     }
 
     # embedding model section
@@ -334,6 +335,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Embedding Model",
         "description": "Settings for the embedding model used by Agent Zero.",
         "fields": embed_model_fields,
+        "tab": "agent",
     }
 
     # embedding model section
@@ -383,6 +385,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Web Browser Model",
         "description": "Settings for the web browser model. Agent Zero uses <a href='https://github.com/browser-use/browser-use' target='_blank'>browser-use</a> agentic framework to handle web interactions.",
         "fields": browser_model_fields,
+        "tab": "agent",
     }
 
     # # Memory settings section
@@ -447,6 +450,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Authentication",
         "description": "Settings for authentication to use Agent Zero Web UI.",
         "fields": auth_fields,
+        "tab": "external",
     }
 
     # api keys model section
@@ -476,6 +480,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "API Keys",
         "description": "API keys for model providers and services used by Agent Zero.",
         "fields": api_keys_fields,
+        "tab": "external",
     }
 
     # Agent config section
@@ -528,6 +533,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Agent Config",
         "description": "Agent parameters.",
         "fields": agent_fields,
+        "tab": "agent",
     }
 
     dev_fields: list[SettingsField] = []
@@ -593,6 +599,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Development",
         "description": "Parameters for A0 framework development. RFCs (remote function calls) are used to call functions on another A0 instance. You can develop and debug A0 natively on your local system while redirecting some functions to A0 instance in docker. This is crucial for development as A0 needs to run in standardized environment to support all features.",
         "fields": dev_fields,
+        "tab": "developer",
     }
 
     # Speech to text section
@@ -664,6 +671,7 @@ def convert_out(settings: Settings) -> SettingsOutput:
         "title": "Speech to Text",
         "description": "Voice transcription preferences and server turn detection settings.",
         "fields": stt_fields,
+        "tab": "agent",
     }
 
     # Add the section to the result
@@ -721,9 +729,10 @@ def get_settings() -> Settings:
 
 def set_settings(settings: Settings):
     global _settings
+    previous = _settings
     _settings = normalize_settings(settings)
     _write_settings_file(_settings)
-    _apply_settings()
+    _apply_settings(previous)
 
 
 def normalize_settings(settings: Settings) -> Settings:
@@ -786,7 +795,7 @@ def get_default_settings() -> Settings:
     return Settings(
         chat_model_provider=ModelProvider.OPENAI.name,
         chat_model_name="gpt-4o",
-        chat_model_kwargs={ "temperature": "0" },
+        chat_model_kwargs={"temperature": "0"},
         chat_model_ctx_length=120000,
         chat_model_ctx_history=0.7,
         chat_model_vision=False,
@@ -797,19 +806,19 @@ def get_default_settings() -> Settings:
         util_model_name="gpt-4o-mini",
         util_model_ctx_length=120000,
         util_model_ctx_input=0.7,
-        util_model_kwargs={ "temperature": "0" },
+        util_model_kwargs={"temperature": "0"},
         util_model_rl_requests=60,
         util_model_rl_input=0,
         util_model_rl_output=0,
-        embed_model_provider=ModelProvider.OPENAI.name,
-        embed_model_name="text-embedding-3-small",
+        embed_model_provider=ModelProvider.HUGGINGFACE.name,
+        embed_model_name="sentence-transformers/all-MiniLM-L6-v2",
         embed_model_kwargs={},
         embed_model_rl_requests=0,
         embed_model_rl_input=0,
         browser_model_provider=ModelProvider.OPENAI.name,
         browser_model_name="gpt-4o",
         browser_model_vision=False,
-        browser_model_kwargs={ "temperature": "0" },
+        browser_model_kwargs={"temperature": "0"},
         api_keys={},
         auth_login="",
         auth_password="",
@@ -830,7 +839,7 @@ def get_default_settings() -> Settings:
     )
 
 
-def _apply_settings():
+def _apply_settings(previous: Settings | None):
     global _settings
     if _settings:
         from agent import AgentContext
@@ -848,6 +857,15 @@ def _apply_settings():
         task = defer.DeferredTask().start_task(
             whisper.preload, _settings["stt_model_size"]
         )  # TODO overkill, replace with background task
+
+        # force memory reload on embedding model change
+        if previous and (
+            _settings["embed_model_name"] != previous["embed_model_name"]
+            or _settings["embed_model_provider"] != previous["embed_model_provider"]
+            or _settings["embed_model_kwargs"] != previous["embed_model_kwargs"]
+        ):
+            from python.helpers.memory import reload as memory_reload
+            memory_reload()
 
 
 def _env_to_dict(data: str):
