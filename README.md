@@ -139,7 +139,7 @@ docker run -p 50001:80 frdel/agent-zero-run
 | [Installation](./docs/installation.md) | Installation, setup and configuration |
 | [Usage](./docs/usage.md) | Basic and advanced usage |
 | [Architecture](./docs/architecture.md) | System design and components |
-| [Contributing](./docs/contributing.md) | How to contribute |
+| [Contributing](./docs/contribution.md) | How to contribute |
 | [Troubleshooting](./docs/troubleshooting.md) | Common issues and their solutions |
 
 ## Coming soon
@@ -149,11 +149,23 @@ docker run -p 50001:80 frdel/agent-zero-run
 
 ## 🎯 Changelog
 
+### v0.8.4.1
+- Various bugfixes related to context management
+- Message formatting improvements
+- Scheduler improvements
+- New model provider
+- Input tool fix
+- Compatibility and stability improvements
+
+### v0.8.4
+[Release video](https://youtu.be/QBh_h_D_E24)
+
+- **Remote access (mobile)**
+
 ### v0.8.3.1
 [Release video](https://youtu.be/AGNpQ3_GxFQ)
 
 - **Automatic embedding**
-
 
 
 ### v0.8.3
